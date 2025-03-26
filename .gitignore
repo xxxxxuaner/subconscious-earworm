@@ -12,4 +12,10 @@ audio-files/*
 *.m4b
 *.m4p
 
+# Ignore Python virtual environments
 venv/
+
+# Ignore macOS system files
+.DS_Store
+**/.DS_Store
+
