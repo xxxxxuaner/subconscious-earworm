@@ -1,285 +1,439 @@
-import network
-from machine import I2S, Pin
 import machine
-import array
+from machine import I2S, Pin
 import time
-import struct
-from builtins import abs  # Explicitly import abs function
 import math
 import os
 import uos
+import _thread
 
+print("=== Ambient Sound Monitor - Initializing ===")
 
-print("Hello World")
-#exec(open('main.py').read())
-#run micropython: https://wiki.seeedstudio.com/xiao_esp32s3_with_micropython/
-#ls /dev/cu*
-#esptool.py --chip esp32s3 --port /dev/cu.usbmodem2101 erase_flash
-#esptool.py --chip esp32s3 --port /dev/cu.usbmodem2101 --baud 460800 write_flash -z 0x0 /Users/koiren/Desktop/subconscious_earworm/ESP32_GENERIC_S3-20241129-v1.24.1.bin
+# Global variables
+last_readings = [0] * 3
+audio_playing = False
+audio_should_play = False
+audio_paused = False
+lock = _thread.allocate_lock()
+mic = None
+audio = None
+running = True  # Main control flag
+rms_history = []
+RMS_HISTORY_SIZE = 10  # About 1 second of readings
 
+# ===== INITIALIZATION FUNCTIONS =====
 
-# SD card configuration
-sd = machine.SDCard(slot=3, width=1,
-                    sck=machine.Pin(7),
-                    mosi=machine.Pin(9),
-                    miso=machine.Pin(8),
-                    cs=machine.Pin(21))
-
-# Mount the SD card
-uos.mount(sd, '/sd')
-
-# Write a file
-with open('/sd/hello.txt', 'w') as f:
-    f.write('Hello, SD card!')
-
-# Read the file
-with open('/sd/hello.txt', 'r') as f:
-    print(f.read())
-
-# List SD contents
-print(uos.listdir('/sd'))
+def init_sd_card():
+    print("Initializing SD card...")
+    try:
+        sd = machine.SDCard(slot=3, width=1,
+                        sck=machine.Pin(7),
+                        mosi=machine.Pin(9),
+                        miso=machine.Pin(8),
+                        cs=machine.Pin(21))
+        
+        # Mount the SD card
+        try:
+            uos.mount(sd, '/sd')
+        except OSError:
+            # Already mounted - unmount and remount
+            try:
+                uos.umount('/sd')
+                time.sleep(0.1)
+                uos.mount(sd, '/sd')
+            except:
+                pass
+                
+        print("SD card mounted successfully")
+        print("SD contents:", os.listdir('/sd'))
+        return sd
+    except Exception as e:
+        print("ERROR: SD card initialization failed:", e)
+        raise
 
 def init_mic():
-    # Deinit any existing I2S instance
+    print("Initializing microphone...")
     try:
-        mic.deinit()
+        # Set up I2S for the microphone
+        microphone = I2S(
+            0,  # I2S ID
+            ws=Pin(1), 
+            sd=Pin(2), 
+            sck=Pin(3),
+            mode=I2S.RX,
+            bits=16,
+            format=I2S.MONO,
+            rate=16000,
+            ibuf=4000
+        )
+        print("Microphone initialized successfully")
+        return microphone
+    except Exception as e:
+        print("ERROR: Microphone initialization failed:", e)
+        raise
+
+def init_speaker():
+    print("Initializing speaker...")
+    try:
+        speaker = I2S(
+            1,
+            ws=Pin(6),
+            sck=Pin(5),
+            sd=Pin(4),
+            mode=I2S.TX,
+            bits=16,
+            format=I2S.MONO,
+            rate=16000,
+            ibuf=4000
+        )
+        print("Speaker initialized successfully")
+        return speaker
+    except Exception as e:
+        print("ERROR: Speaker initialization failed:", e)
+        raise
+
+# Safe cleanup function
+def safe_cleanup():
+    global mic, audio, running, audio_should_play, audio_playing
+    print("Performing safe cleanup...")
+    
+    # Stop all threads
+    running = False
+    audio_should_play = False
+    audio_playing = False
+    
+    # Wait for threads to stop
+    time.sleep(1)
+    
+    # Cleanup hardware
+    try:
+        if mic:
+            mic.deinit()
+            print("Microphone deinitialized")
+    except:
+        pass
+        
+    try:
+        if audio:
+            audio.deinit()
+            print("Speaker deinitialized")
+    except:
+        pass
+        
+    # Unmount SD card
+    try:
+        uos.umount('/sd')
+        print("SD card unmounted")
     except:
         pass
     
-    # Set up I2S for the microphone
-    return I2S(
-        0,  # I2S ID
-        ws=Pin(1),  # WS (Word Select / LRCLK)
-        sd=Pin(2),  # DOUT (Data)
-        sck=Pin(3),  # BCLK (Bit Clock)
-        mode=I2S.RX,
-        bits=16,
-        format=I2S.MONO,
-        rate=16000,  # 16kHz sample rate
-        ibuf=2000    # Increased buffer size for better stability
-    )
+    print("Cleanup complete")
 
-# Initialize the microphone
-mic = init_mic()
+# ===== SOUND DETECTION =====
 
 def detect_sound():
-    global mic
+    global mic, last_readings, running, rms_history
+    
+    if not running:
+        return 0, 0, 0
+        
     try:
-        # Read a larger buffer for better sampling
-        buf = bytearray(1024)  # Increased buffer size for better accuracy
+        # Read audio buffer
+        buf = bytearray(2048)
         mic.readinto(buf)
         
-        # Calculate RMS (Root Mean Square) for better audio level measurement
+        # Process samples with gain
         samples = []
+        gain = 5  # Same gain as mic_test.py
         for i in range(0, len(buf), 2):
+            # Get 16-bit sample
             value = (buf[i+1] << 8) | buf[i]
             if value & 0x8000:
                 value -= 0x10000
+            
+            # Apply gain and clamp
+            value = int(value * gain)
+            value = max(min(value, 32767), -32768)
+            
             samples.append(value)
         
         # Calculate RMS value
         rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples))
         
-        # Scale RMS to a 0-100 range based on your environment
-        # Very quiet: ~3600
-        # Loud: ~4000
-        # So we'll use 3600 as our baseline and 4000 as our maximum
-        min_rms = 3600
-        max_rms = 4000
+        # Dynamic scaling
+        min_rms = 3550
+        max_rms = 4100
         
-        # Enhanced sensitivity for quieter sounds using exponential scaling
+        # Calculate normalized level with logarithmic scaling
         if rms < min_rms:
             normalized_level = 0
         elif rms > max_rms:
             normalized_level = 100
         else:
-            # Use exponential scaling to make it more sensitive to quieter sounds
-            # This will give more resolution in the lower ranges
-            range_rms = max_rms - min_rms
-            normalized_rms = (rms - min_rms) / range_rms
-            normalized_level = math.pow(normalized_rms, 0.5) * 100  # Square root for more sensitivity to lower values
+            normalized_rms = (rms - min_rms) / (max_rms - min_rms)
+            normalized_level = (math.log(1 + 9 * normalized_rms) / math.log(10)) * 100
         
-        # Categorize the noise level based on normalized values
-        # Adjusted boundaries to be more sensitive to quieter sounds
-        if normalized_level < 5:
-            category = "Very Quiet"
-        elif normalized_level < 15:
-            category = "Quiet"
-        elif normalized_level < 30:
-            category = "Moderate"
-        elif normalized_level < 50:
-            category = "Loud"
-        else:
-            category = "Very Loud"
+        # Calculate rate of change
+        derivative = rms - sum(last_readings) / len(last_readings)
         
-        # Print detailed information
-        print(f"Level: {normalized_level:.1f}/100 ({category})")
-        print(f"Raw RMS: {rms:.1f}")
+        # Update history
+        last_readings.pop(0)
+        last_readings.append(rms)
         
-        # Return both the level and whether it's above threshold
-        threshold = 5  # Very low threshold for maximum sensitivity
-        return normalized_level, rms  # Now returning RMS value instead of threshold check
+        # After calculating RMS, update RMS history
+        rms_history.append(rms)
+        if len(rms_history) > RMS_HISTORY_SIZE:
+            rms_history.pop(0)
+        
+        # Calculate average RMS
+        avg_rms = sum(rms_history) / len(rms_history)
+        
+        print(f"Sound: {normalized_level:.1f}% | RMS: {rms:.1f} | Avg RMS: {avg_rms:.1f} | Change: {derivative:.1f}")
+        
+        return normalized_level, avg_rms, derivative  # Return average RMS instead of instantaneous
         
     except Exception as e:
-        print("Error:", e)
-        mic = init_mic()
-        time.sleep(0.1)
-        return 0, 0
+        print("ERROR in detect_sound:", e)
+        try:
+            if mic:
+                mic.deinit()
+            time.sleep(0.1)
+            mic = init_mic()
+        except:
+            print("Failed to reinitialize mic")
+        return 0, 0, 0
 
-print("Testing ambient noise detection with external microphone...")
-print("Monitoring environment levels...")
-print("Calibrated for RMS range: 3600 (Very Quiet) - 4000 (Very Loud)")
-print("Sensitivity: Ultra High (threshold at 5)")
-print("Using exponential scaling for better quiet sound detection")
-
-# Initialize variables for running average
-WINDOW_SIZE = 5  # Smaller window for faster response
-readings = []
-
-# try:
-#     while True:
-#         level, rms = detect_sound()  # Now getting RMS value
-        
-#         # Maintain a running average
-#         readings.append(level)
-#         if len(readings) > WINDOW_SIZE:
-#             readings.pop(0)
-        
-#         avg_level = sum(readings) / len(readings)
-        
-#         # Print a visual indicator of the noise level
-#         bars = "█" * int(avg_level / 5)
-#         print(f"Level: {bars} ({avg_level:.1f})")
-        
-#         time.sleep(0.2)  # Slightly longer delay for more stable readings
-# except KeyboardInterrupt:
-#     print("\nMonitoring stopped")
-#     mic.deinit()
-
-# Set up I2S for DAC; debug the speaker
-print("\nInitializing speaker...")
-try:
-    audio = I2S(
-        1, #VIN → 3.3V ; GND → GND
-        ws=Pin(6),   #LRC (LRCLK) → GPIO 9
-        sck=Pin(5),  #BCLK → GPIO 8
-        sd=Pin(4),   #DIN → GPIO 7
-        mode=I2S.TX,
-        bits=16,
-        format=I2S.MONO,
-        rate=16000,
-        ibuf=4000
-    )
-    print("Speaker initialized successfully")
-except Exception as e:
-    print("Error initializing speaker:", e)
-    raise
-
-def play_audio(filename):
-    try:
-        print(f"Playing {filename} from SD card...")
-        # Open the raw audio file from SD card
-        with open('/sd/' + filename, 'rb') as f:
-            # Read and play in chunks of 1024 bytes (512 samples)
-            while True:
-                chunk = f.read(1024)
-                if not chunk:
-                    break
-                audio.write(chunk)
-                time.sleep(0.01)  # Small delay to prevent buffer overflow
-        print("Audio playback completed")
-        
-    except Exception as e:
-        print(f"Error playing audio: {e}")
-        print("Make sure the audio file is in raw format (16-bit mono PCM) and exists on the SD card")
+# ===== AUDIO PLAYBACK =====
 
 def play_beep():
+    print("Playing test beep...")
     try:
-        print("Playing beep...")
-        # Play the audio file
-        play_audio('test1.raw')
-        print("Beep finished!")
+        with open('/sd/joey.raw', 'rb') as f:
+            data = f.read(1024)  # Read in smaller chunks
+            while data and running:
+                audio.write(data)
+                data = f.read(1024)
+        print("Beep complete")
     except Exception as e:
-        print("Error playing beep:", e)
-        # Try to reinitialize the speaker
-        try:
-            audio.deinit()
-            time.sleep(0.1)
-            audio = I2S(
-                1,
-                ws=Pin(6),
-                sck=Pin(5),
-                sd=Pin(4),
-                mode=I2S.TX,
-                bits=16,
-                format=I2S.MONO,
-                rate=16000,
-                ibuf=4000
-            )
-            print("Speaker reinitialized")
-        except Exception as e2:
-            print("Error reinitializing speaker:", e2)
+        print("ERROR in play_beep:", e)
 
-# Test the speaker with a simple pattern
-print("\nTesting speaker with a simple pattern...")
-try:
-    for i in range(3):
-        print(f"Test beep {i+1}/3")
-        play_beep()
-        time.sleep(1)  # Wait between beeps
-    print("Speaker test complete")
-except Exception as e:
-    print("Error during speaker test:", e)
-
-# Main noise detection and beep loop
-print("\nStarting noise-activated beeper...")
-print("Will beep when RMS > 3800")
-
-try:
-    while True:
-        level, rms = detect_sound()
-        
-        # Check if RMS is above threshold and beep if it is
-        if rms > 3800:
-            print("Loud noise detected! 🔊")
-            play_beep()
-        
-        time.sleep(0.2)
-except KeyboardInterrupt:
-    print("\nMonitoring stopped")
-    mic.deinit()
-    audio.deinit()
-    # Unmount SD card before exiting
-    try:
-        os.umount('/sd')
-        print("SD Card unmounted")
-    except:
-        pass
-
-# # Test the speaker
-# while True:
-#     play_beep()  # Play a beep
-#     time.sleep(1)  # Wait 1 second between beeps
-
-
-
-
-
-# # connect to the internet
-# def do_connect():
-#     wlan = network.WLAN(network.STA_IF)  # Set up as station (client)
-#     wlan.active(True)  # Activate WiFi
+def play_audio_thread(filename):
+    global audio_playing, audio_should_play, audio_paused, audio, running
     
-#     if not wlan.isconnected():
-#         print('Connecting to network...')
-#         wlan.connect('SSID', 'PASSWORD')  # Replace with correct SSID & Password
+    try:
+        print(f"Audio thread starting for {filename}")
+        while audio_should_play and running:
+            try:
+                with open('/sd/' + filename, 'rb') as f:
+                    while audio_should_play and running:
+                        if not audio_paused:
+                            chunk = f.read(1024)
+                            if not chunk:  # End of file
+                                break  # Will restart from beginning
+                            try:
+                                audio.write(chunk)
+                                # Small yield to allow other operations
+                                time.sleep(0.001)
+                            except Exception as e:
+                                print(f"ERROR writing audio: {e}")
+                                break
+                        else:
+                            time.sleep(0.1)  # Pause
+                    
+                    if not audio_should_play or not running:
+                        break
+            except Exception as e:
+                print(f"ERROR opening audio file: {e}")
+                break
+    except Exception as e:
+        print(f"ERROR in audio playback thread: {e}")
+    finally:
+        # Thorough cleanup
+        with lock:
+            audio_playing = False
+            audio_should_play = False
+            audio_paused = False
+        try:
+            # Reset audio interface if needed
+            if audio and running:
+                audio.deinit()
+                time.sleep(0.1)
+                audio = init_speaker()
+        except:
+            pass
+        print("Audio thread ended and cleaned up")
+
+def start_audio_playback(filename):
+    global audio_playing, audio_should_play, audio_paused
+    
+    if not running:
+        return
         
-#         timeout = 10  # Set a timeout to avoid infinite loop
-#         while not wlan.isconnected() and timeout > 0:
-#             timeout -= 1
+    with lock:
+        if audio_playing:
+            audio_paused = False
+            print("Resuming playback")
+            return
             
-#     if wlan.isconnected():
-#         print('Network config:', wlan.ifconfig())
-#     else:
-#         print('Failed to connect. Check SSID/Password.')
-# do_connect()
+        audio_should_play = True
+        audio_paused = False
+        audio_playing = True
+    
+    print(f"Starting playback of {filename}")
+    _thread.start_new_thread(play_audio_thread, (filename,))
+
+def pause_audio_playback():
+    global audio_paused, audio_playing
+    
+    if not running:
+        return
+        
+    with lock:
+        if audio_playing:
+            audio_paused = True
+            print("Paused playback")
+
+# ===== ERROR WATCHDOG =====
+def watchdog_thread():
+    global running
+    counter = 0
+    
+    # Give system time to initialize
+    time.sleep(5)
+    
+    while running:
+        counter += 1
+        # Every 30 seconds, check if system is responsive
+        if counter > 300:  # 300 * 0.1s = 30 seconds
+            print("Watchdog check")
+            counter = 0
+            # Add any health checks here
+        time.sleep(0.1)
+
+# ===== MAIN PROGRAM =====
+
+def main():
+    global mic, audio, running, audio_playing, audio_paused
+    
+    # Set up watchdog thread for safety
+    _thread.start_new_thread(watchdog_thread, ())
+    
+    print("\n=== Ambient Sound Monitor - Starting ===")
+    
+    # Configuration
+    AUDIO_FILE = 'joey.raw'
+    THRESHOLD_RMS = 18300 #3700
+    DERIVATIVE_THRESHOLD = 1000.0
+    
+    # Verify audio file exists
+    if AUDIO_FILE not in os.listdir('/sd'):
+        print(f"ERROR: {AUDIO_FILE} not found on SD card!")
+        print("Available files:", os.listdir('/sd'))
+        return
+    
+    print(f"Using audio file: {AUDIO_FILE}")
+    print(f"RMS threshold: {THRESHOLD_RMS}")
+    print(f"Derivative threshold: {DERIVATIVE_THRESHOLD}")
+    
+    try:
+        # Test beep once
+        #play_beep()
+        
+        print("Starting main monitoring loop")
+        while running:
+            try:
+                #print("Detecting sound...")
+                level, rms, derivative = detect_sound()
+                #print(f"Detection complete: RMS={rms}, derivative={derivative}")
+                
+                # Check triggers
+                #print(f"Checking sound triggers (threshold={THRESHOLD_RMS}, derivative={DERIVATIVE_THRESHOLD})")
+                if rms > THRESHOLD_RMS or derivative > DERIVATIVE_THRESHOLD:
+                    print(f"Sound level above threshold")
+                    #print(f"Audio state: playing={audio_playing}, paused={audio_paused}")
+                    if not audio_playing or audio_paused:
+                        print(f"🔊 TRIGGER: RMS={rms:.1f}, Change={derivative:.1f}")
+                        start_audio_playback(AUDIO_FILE)
+                else:
+                    print(f"Sound level below threshold")
+                    #print(f"Audio state: playing={audio_playing}, paused={audio_paused}")
+                    if audio_playing and not audio_paused:
+                        print(f"🔇 BELOW THRESHOLD: RMS={rms:.1f}")
+                        pause_audio_playback()
+                
+                # Allow interrupts
+                #print("Sleeping...")
+                #time.sleep(0.1)
+                #print("Loop complete, restarting...")
+            except Exception as e:
+                print(f"ERROR in loop iteration: {e}")
+                import sys
+                sys.print_exception(e)  # Print full exception details
+                
+    except KeyboardInterrupt:
+        print("\nMonitoring stopped by user")
+    except Exception as e:
+        print(f"ERROR in main loop: {e}")
+        import sys
+        sys.print_exception(e)  # Print full exception details
+    finally:
+        # Set flag to stop all threads
+        running = False
+        
+        # Thorough cleanup
+        with lock:
+            audio_should_play = False
+            audio_playing = False
+            audio_paused = False
+        
+        # Longer delay for cleanup
+        time.sleep(1.0)  
+        
+        # Final hardware shutdown
+        safe_cleanup()
+
+# ===== SAFE BOOT DETECTION =====
+
+# Allow interruption during boot
+def safe_boot():
+    print("Safe boot: Press any key in 5 seconds to enter REPL mode...")
+    for i in range(50):
+        print(".", end="")
+        # Check for keypress (can't detect directly, but can add button check)
+        time.sleep(0.1)
+    print("\nContinuing with normal startup")
+
+# ===== PROGRAM ENTRY POINT =====
+
+try:
+    # First thing: enable safe boot option
+    safe_boot()
+    
+    # Sequential initialization with better error handling
+    print("Initializing hardware components...")
+    try:
+        sd_card = init_sd_card()
+        time.sleep(0.5)
+        
+        mic = init_mic()
+        time.sleep(0.5)
+        
+        audio = init_speaker()
+        time.sleep(0.5)
+        
+        print("All hardware initialized successfully")
+        
+        # Start main program
+        main()
+        
+    except Exception as e:
+        print("CRITICAL ERROR during initialization:", e)
+        safe_cleanup()
+        
+except KeyboardInterrupt:
+    # Catch keyboard interrupt during initialization
+    print("\nStartup interrupted by user - entering REPL mode")
+    # Don't start the program
+    
+finally:
+    # Final cleanup if we get here
+    safe_cleanup()

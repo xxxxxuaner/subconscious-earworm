@@ -1,0 +1,15 @@
+# Ignore contents of audio-files directory
+audio-files/*
+
+# But keep the directory itself and .gitkeep
+!audio-files/.gitkeep
+
+# Ignore all audio file types anywhere
+*.mp3
+*.wav
+*.raw
+*.m4a
+*.m4b
+*.m4p
+
+venv/

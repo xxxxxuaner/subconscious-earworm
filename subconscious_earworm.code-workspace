@@ -6,6 +6,14 @@
 		{
 			"name": "hardware",
 			"path": "hardware"
+		},
+		{
+			"name": "serial://dev/tty.usbmodem2101",
+			"uri": "serial://%2fdev%2ftty.usbmodem2101/"
+		},
+		{
+			"name": "serial://dev/tty.usbmodem101",
+			"uri": "serial://%2fdev%2ftty.usbmodem101/"
 		}
 	],
 	"settings": {}
