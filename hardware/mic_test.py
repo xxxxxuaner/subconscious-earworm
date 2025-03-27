@@ -65,8 +65,10 @@ def init_speaker():
         ibuf=4000
     )
 
-def record_to_file(filename, duration_seconds=3, gain=5):
-    print(f"Recording for {duration_seconds} seconds directly to {filename} (gain={gain}x)...")
+def record_to_file(filename, duration_seconds=3, apply_gain=False, gain=5, apply_correction=True):
+    print(f"Recording for {duration_seconds} seconds directly to {filename}")
+    print(f"Settings: gain={'ON' if apply_gain else 'OFF'} ({gain}x), "
+          f"SPH0645LM4H correction: {'ON' if apply_correction else 'OFF'}")
     
     # Calculate number of samples
     samples_per_second = 16000  # Our sample rate
@@ -80,24 +82,30 @@ def record_to_file(filename, duration_seconds=3, gain=5):
                 buffer = bytearray(1024)  # 512 samples per chunk
                 mic.readinto(buffer)
                 
-                # Apply gain to the samples
-                # Convert bytearray to array of 16-bit samples
+                # Process samples
                 amplified = bytearray(len(buffer))
                 for i in range(0, len(buffer), 2):
                     # Get 16-bit sample
                     sample = (buffer[i+1] << 8) | buffer[i]
-                    if sample & 0x8000:  # Convert to signed
+                    if sample & 0x8000:
                         sample -= 0x10000
                     
-                    # Apply gain and clamp to 16-bit range
-                    sample = int(sample * gain)
+                    # Apply SPH0645LM4H correction if enabled
+                    if apply_correction:
+                        sample = sample >> 1
+                    
+                    # Apply gain if enabled
+                    if apply_gain:
+                        sample = int(sample * gain)
+                    
+                    # Clamp to 16-bit range
                     sample = max(min(sample, 32767), -32768)
                     
                     # Convert back to bytes
                     amplified[i] = sample & 0xFF
                     amplified[i+1] = (sample >> 8) & 0xFF
                 
-                # Write amplified data
+                # Write processed data
                 f.write(amplified)
                 samples_recorded += len(buffer)
                 
@@ -131,6 +139,57 @@ def play_from_file(filename):
         print("Error during playback:", e)
         return False
 
+def int_to_binary_str(value, width=16):
+    """Convert integer to binary string representation"""
+    if value < 0:
+        value = value & ((1 << width) - 1)  # Convert negative to two's complement
+    result = ""
+    for i in range(width-1, -1, -1):
+        result += "1" if value & (1 << i) else "0"
+    return result
+
+def analyze_samples(filename, offset_seconds=1, num_samples=20):
+    """Analyze samples from a specific point in the recording"""
+    print(f"\nAnalyzing {filename} at {offset_seconds}s offset:")
+    
+    try:
+        with open(f'/sd/{filename}', 'rb') as f:
+            # Calculate offset in bytes (16000 samples/sec * 2 bytes/sample)
+            offset_bytes = int(offset_seconds * 16000 * 2)
+            f.seek(offset_bytes)
+            
+            # Read a chunk of samples
+            data = f.read(num_samples * 2)  # 2 bytes per sample
+            
+            # Convert to samples and print
+            samples = []
+            for i in range(0, len(data), 2):
+                sample = (data[i+1] << 8) | data[i]
+                if sample & 0x8000:
+                    sample -= 0x10000
+                samples.append(sample)
+            
+            # Print analysis
+            print("\nSample Analysis:")
+            print("Index  |  Raw Value  |  Amplitude (%)  |  Binary")
+            print("-" * 55)
+            for i, sample in enumerate(samples):
+                amplitude_pct = (abs(sample) / 32768) * 100  # Convert to percentage of max amplitude
+                binary = int_to_binary_str(sample)
+                print(f"{i:5d}  |  {sample:6d}     |  {amplitude_pct:6.2f}%      |  {binary}")
+            
+            # Print statistics
+            print("\nStatistics:")
+            print(f"Average amplitude: {sum(abs(s) for s in samples) / len(samples):.2f}")
+            print(f"Max amplitude: {max(abs(s) for s in samples)}")
+            print(f"Min amplitude: {min(abs(s) for s in samples)}")
+            
+            return samples
+            
+    except Exception as e:
+        print(f"Error analyzing file: {e}")
+        return None
+
 # Main test sequence
 try:
     # Initialize hardware
@@ -138,17 +197,50 @@ try:
     mic = init_mic()
     speaker = init_speaker()
     
-    print("\nStarting test sequence...")
+    print("\nStarting comparison test sequence...")
     
-    # Record audio directly to file with gain
-    print("\n1. Recording audio to SD card...")
-    if record_to_file('mic_test.raw', duration_seconds=3, gain=5):  # 5x gain
+    # Test all combinations
+    print("\n1. Recording WITH correction, WITH gain...")
+    if record_to_file('mic_test_both.raw', duration_seconds=3, 
+                      apply_gain=True, gain=5, apply_correction=True):
         
-        # Play it back from the file
-        print("\n2. Playing back recording from SD card...")
-        play_from_file('mic_test.raw')
+        print("\n2. Recording WITH correction, NO gain...")
+        if record_to_file('mic_test_corr_only.raw', duration_seconds=3, 
+                         apply_gain=False, gain=5, apply_correction=True):
+            
+            print("\n3. Recording NO correction, WITH gain...")
+            if record_to_file('mic_test_gain_only.raw', duration_seconds=3, 
+                            apply_gain=True, gain=5, apply_correction=False):
+                
+                print("\n4. Recording NO correction, NO gain...")
+                if record_to_file('mic_test_neither.raw', duration_seconds=3, 
+                                apply_gain=False, gain=5, apply_correction=False):
+                    
+                    # Analyze all recordings
+                    print("\n=== SAMPLE ANALYSIS ===")
+                    samples_both = analyze_samples('mic_test_both.raw')
+                    samples_corr = analyze_samples('mic_test_corr_only.raw')
+                    samples_gain = analyze_samples('mic_test_gain_only.raw')
+                    samples_neither = analyze_samples('mic_test_neither.raw')
+                    
+                    # Play back all versions
+                    print("\n=== PLAYBACK ===")
+                    print("\nPlaying: Correction ON, Gain ON...")
+                    play_from_file('mic_test_both.raw')
+                    time.sleep(1)
+                    
+                    print("\nPlaying: Correction ON, Gain OFF...")
+                    play_from_file('mic_test_corr_only.raw')
+                    time.sleep(1)
+                    
+                    print("\nPlaying: Correction OFF, Gain ON...")
+                    play_from_file('mic_test_gain_only.raw')
+                    time.sleep(1)
+                    
+                    print("\nPlaying: Correction OFF, Gain OFF...")
+                    play_from_file('mic_test_neither.raw')
     
-    print("\nTest sequence complete!")
+    print("\nComparison test sequence complete!")
 
 except Exception as e:
     print("Error in test sequence:", e)
