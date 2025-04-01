@@ -18,7 +18,13 @@ mic = None
 audio = None
 running = True  # Main control flag
 rms_history = []
-RMS_HISTORY_SIZE = 10  # About 1 second of readings
+RMS_HISTORY_SIZE = 10  # For display and general tracking
+
+# These will track consistent trigger states
+above_threshold_count = 0  # Count of consecutive samples above threshold
+below_threshold_count = 0  # Count of consecutive samples below threshold
+ABOVE_THRESHOLD_REQUIRED = 50  # ~2 seconds worth of samples
+BELOW_THRESHOLD_REQUIRED = 1   # ~1 second worth of samples
 
 # ===== INITIALIZATION FUNCTIONS =====
 
@@ -134,7 +140,7 @@ def detect_sound():
     global mic, last_readings, running, rms_history
     
     if not running:
-        return 0, 0, 0
+        return 0, 0
         
     try:
         # Read audio buffer
@@ -172,25 +178,11 @@ def detect_sound():
             normalized_rms = (rms - min_rms) / (max_rms - min_rms)
             normalized_level = (math.log(1 + 9 * normalized_rms) / math.log(10)) * 100
         
-        # Calculate rate of change
-        derivative = rms - sum(last_readings) / len(last_readings)
+        # Display counter information
+        print(f"Sound: {normalized_level:.1f}% | RMS: {rms:.1f} | Above: {above_threshold_count}/{ABOVE_THRESHOLD_REQUIRED} | Below: {below_threshold_count}/{BELOW_THRESHOLD_REQUIRED}")
         
-        # Update history
-        last_readings.pop(0)
-        last_readings.append(rms)
+        return normalized_level, rms
         
-        # After calculating RMS, update RMS history
-        rms_history.append(rms)
-        if len(rms_history) > RMS_HISTORY_SIZE:
-            rms_history.pop(0)
-        
-        # Calculate average RMS
-        avg_rms = sum(rms_history) / len(rms_history)
-        
-        print(f"Sound: {normalized_level:.1f}% | RMS: {rms:.1f} | Avg RMS: {avg_rms:.1f} | Change: {derivative:.1f}")
-        
-        return normalized_level, avg_rms, derivative  # Return average RMS instead of instantaneous
-
     except Exception as e:
         print("ERROR in detect_sound:", e)
         try:
@@ -200,22 +192,9 @@ def detect_sound():
             mic = init_mic()
         except:
             print("Failed to reinitialize mic")
-        return 0, 0, 0
+        return 0, 0
 
 # ===== AUDIO PLAYBACK =====
-
-def play_beep():
-    print("Playing test beep...")
-    # try:
-    #     with open('/sd/joey.raw', 'rb') as f:
-    #         data = f.read(1024)  # Read in smaller chunks
-    #         while data and running:
-    #             audio.write(data)
-    #             data = f.read(1024)
-    #     print("Beep complete")
-    # except Exception as e:
-    #     print("ERROR in play_beep:", e)
-
 def play_audio_thread(filename):
     global audio_playing, audio_should_play, audio_paused, audio, running
     
@@ -312,7 +291,7 @@ def watchdog_thread():
 # ===== MAIN PROGRAM =====
 
 def main():
-    global mic, audio, running, audio_playing, audio_paused
+    global mic, audio, running, audio_playing, audio_paused, above_threshold_count, below_threshold_count
     
     # Set up watchdog thread for safety
     _thread.start_new_thread(watchdog_thread, ())
@@ -321,8 +300,7 @@ def main():
     
     # Configuration
     AUDIO_FILE = 'branches.raw'
-    THRESHOLD_RMS = 4000 #3700
-    DERIVATIVE_THRESHOLD = 1000.0
+    THRESHOLD_RMS = 1500
     
     # Verify audio file exists
     if AUDIO_FILE not in os.listdir('/sd'):
@@ -332,38 +310,34 @@ def main():
     
     print(f"Using audio file: {AUDIO_FILE}")
     print(f"RMS threshold: {THRESHOLD_RMS}")
-    print(f"Derivative threshold: {DERIVATIVE_THRESHOLD}")
     
     try:
-        # Test beep once
-        #play_beep()
-        
         print("Starting main monitoring loop")
         while running:
             try:
-                #print("Detecting sound...")
-                level, rms, derivative = detect_sound()
-                #print(f"Detection complete: RMS={rms}, derivative={derivative}")
+                level, rms = detect_sound()
                 
-                # Check triggers
-                #print(f"Checking sound triggers (threshold={THRESHOLD_RMS}, derivative={DERIVATIVE_THRESHOLD})")
-                if rms > THRESHOLD_RMS or derivative > DERIVATIVE_THRESHOLD:
+                # Threshold checking with hysteresis
+                if rms > THRESHOLD_RMS:
                     print(f"Sound level above threshold")
-                    #print(f"Audio state: playing={audio_playing}, paused={audio_paused}")
-                    if not audio_playing or audio_paused:
-                        print(f"🔊 TRIGGER: RMS={rms:.1f}, Change={derivative:.1f}")
-                        start_audio_playback(AUDIO_FILE)
+                    above_threshold_count += 1
+                    below_threshold_count = 0  # Reset counter when above threshold
+                    
+                    # Only start playback after sustained noise
+                    if above_threshold_count >= ABOVE_THRESHOLD_REQUIRED:
+                        if not audio_playing or audio_paused:
+                            print(f"🔊 SUSTAINED TRIGGER: RMS={rms:.1f}, Above for {above_threshold_count} samples")
+                            start_audio_playback(AUDIO_FILE)
                 else:
                     print(f"Sound level below threshold")
-                    #print(f"Audio state: playing={audio_playing}, paused={audio_paused}")
-                    if audio_playing and not audio_paused:
-                        print(f"🔇 BELOW THRESHOLD: RMS={rms:.1f}")
-                        pause_audio_playback()
-                
-                # Allow interrupts
-                #print("Sleeping...")
-                #time.sleep(0.1)
-                #print("Loop complete, restarting...")
+                    below_threshold_count += 1
+                    above_threshold_count = 0  # Reset counter when below threshold
+                    
+                    # Quicker to pause after sound drops
+                    if below_threshold_count >= BELOW_THRESHOLD_REQUIRED:
+                        if audio_playing and not audio_paused:
+                            print(f"🔇 SUSTAINED QUIET: RMS={rms:.1f}, Below for {below_threshold_count} samples")
+                            pause_audio_playback()
             except Exception as e:
                 print(f"ERROR in loop iteration: {e}")
                 import sys
