@@ -206,15 +206,15 @@ def detect_sound():
 
 def play_beep():
     print("Playing test beep...")
-    try:
-        with open('/sd/joey.raw', 'rb') as f:
-            data = f.read(1024)  # Read in smaller chunks
-            while data and running:
-                audio.write(data)
-                data = f.read(1024)
-        print("Beep complete")
-    except Exception as e:
-        print("ERROR in play_beep:", e)
+    # try:
+    #     with open('/sd/joey.raw', 'rb') as f:
+    #         data = f.read(1024)  # Read in smaller chunks
+    #         while data and running:
+    #             audio.write(data)
+    #             data = f.read(1024)
+    #     print("Beep complete")
+    # except Exception as e:
+    #     print("ERROR in play_beep:", e)
 
 def play_audio_thread(filename):
     global audio_playing, audio_should_play, audio_paused, audio, running
@@ -320,7 +320,7 @@ def main():
     print("\n=== Ambient Sound Monitor - Starting ===")
     
     # Configuration
-    AUDIO_FILE = 'test_song.raw'
+    AUDIO_FILE = 'branches.raw'
     THRESHOLD_RMS = 4000 #3700
     DERIVATIVE_THRESHOLD = 1000.0
     
