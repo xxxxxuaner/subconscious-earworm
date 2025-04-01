@@ -53,15 +53,15 @@ def init_sd_card():
 def init_mic():
     print("Initializing microphone...")
     try:
-        # Set up I2S for the microphone
+# Set up I2S for the microphone
         microphone = I2S(
-            0,  # I2S ID
+    0,  # I2S ID
             ws=Pin(1), 
             sd=Pin(2), 
             sck=Pin(3),
-            mode=I2S.RX,
-            bits=16,
-            format=I2S.MONO,
+    mode=I2S.RX,
+    bits=16,
+    format=I2S.MONO,
             rate=16000,
             ibuf=4000
         )
@@ -76,9 +76,9 @@ def init_speaker():
     try:
         speaker = I2S(
             1,
-            ws=Pin(6),
-            sck=Pin(5),
-            sd=Pin(4),
+            ws=Pin(6), #lrclr
+            sck=Pin(5), #bclk
+            sd=Pin(4), #dout
             mode=I2S.TX,
             bits=16,
             format=I2S.MONO,
@@ -190,7 +190,7 @@ def detect_sound():
         print(f"Sound: {normalized_level:.1f}% | RMS: {rms:.1f} | Avg RMS: {avg_rms:.1f} | Change: {derivative:.1f}")
         
         return normalized_level, avg_rms, derivative  # Return average RMS instead of instantaneous
-        
+
     except Exception as e:
         print("ERROR in detect_sound:", e)
         try:
@@ -320,8 +320,8 @@ def main():
     print("\n=== Ambient Sound Monitor - Starting ===")
     
     # Configuration
-    AUDIO_FILE = 'joey.raw'
-    THRESHOLD_RMS = 18300 #3700
+    AUDIO_FILE = 'test_song.raw'
+    THRESHOLD_RMS = 4000 #3700
     DERIVATIVE_THRESHOLD = 1000.0
     
     # Verify audio file exists
