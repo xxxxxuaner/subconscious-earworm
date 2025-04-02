@@ -23,7 +23,7 @@ RMS_HISTORY_SIZE = 10  # For display and general tracking
 # These will track consistent trigger states
 above_threshold_count = 0  # Count of consecutive samples above threshold
 below_threshold_count = 0  # Count of consecutive samples below threshold
-ABOVE_THRESHOLD_REQUIRED = 50  # ~2 seconds worth of samples
+ABOVE_THRESHOLD_REQUIRED = 20  # ~2 seconds worth of samples
 BELOW_THRESHOLD_REQUIRED = 1   # ~1 second worth of samples
 
 # ===== INITIALIZATION FUNCTIONS =====
@@ -299,8 +299,8 @@ def main():
     print("\n=== Ambient Sound Monitor - Starting ===")
     
     # Configuration
-    AUDIO_FILE = 'branches.raw'
-    THRESHOLD_RMS = 1500
+    AUDIO_FILE = 'branches_med.raw' #branches_soft, branches_med, branches_loud
+    THRESHOLD_RMS = 750
     
     # Verify audio file exists
     if AUDIO_FILE not in os.listdir('/sd'):
